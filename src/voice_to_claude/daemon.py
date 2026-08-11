@@ -43,6 +43,10 @@ class VoiceDaemon:
         self.pressed_keys: Set[keyboard.Key] = set()
         self.keyboard_listener: Optional[keyboard.Listener] = None
         self.running = False
+        # Watchdog: en modo toggle, si la segunda pulsación se pierde la
+        # grabación seguiría abierta indefinidamente (4-jun-2026: daemon.log
+        # registró audios de 415s y 1343s). Corta sola a max_recording_seconds.
+        self._watchdog: Optional[threading.Timer] = None
 
         # Build required keys set based on config
         self.required_keys = self._build_required_keys()
@@ -66,22 +70,54 @@ class VoiceDaemon:
             logger.info(message)
 
     def _on_press(self, key: keyboard.Key) -> None:
-        """Handle key press."""
+        """Handle key press (TOGGLE mode: press once to start, press again to stop)."""
         if key in self.required_keys:
             self.pressed_keys.add(key)
 
-            # Start recording when all required keys are pressed
-            if self.pressed_keys == self.required_keys and not self.is_recording:
-                self._start_recording()
+            # Toggle when the full hotkey combo is held down.
+            if self.pressed_keys == self.required_keys:
+                if not self.is_recording:
+                    self._start_recording()
+                else:
+                    self._stop_recording()
+                # Require a fresh full combo before toggling again, so holding
+                # the keys does not retrigger and a new press is needed.
+                self.pressed_keys.clear()
 
     def _on_release(self, key: keyboard.Key) -> None:
-        """Handle key release."""
+        """Handle key release.
+
+        Toggle mode: release does NOT stop recording (that is what the second
+        press is for). We only keep the pressed-keys set tidy.
+        """
         if key in self.required_keys:
             self.pressed_keys.discard(key)
 
-            # Stop recording when any required key is released
-            if self.is_recording:
-                self._stop_recording()
+    def _arm_watchdog(self) -> None:
+        """Programa el corte automático de la grabación."""
+        self._cancel_watchdog()
+        seconds = max(1, int(self.config.max_recording_seconds))
+        self._watchdog = threading.Timer(seconds, self._on_watchdog_fire)
+        self._watchdog.daemon = True
+        self._watchdog.start()
+
+    def _cancel_watchdog(self) -> None:
+        """Cancela el corte automático si sigue armado."""
+        if self._watchdog is not None:
+            self._watchdog.cancel()
+            self._watchdog = None
+
+    def _on_watchdog_fire(self) -> None:
+        """Se cumplió el máximo de grabación: cerrar y transcribir lo que haya."""
+        if not self.is_recording:
+            return
+        self._log(
+            f"Límite de {self.config.max_recording_seconds}s alcanzado, "
+            "cierro la grabación automáticamente"
+        )
+        # pressed_keys puede haber quedado sucio si se perdió la 2ª pulsación.
+        self.pressed_keys.clear()
+        self._stop_recording()
 
     def _start_recording(self) -> None:
         """Start recording audio."""
@@ -93,6 +129,7 @@ class VoiceDaemon:
 
         try:
             self.recorder.start()
+            self._arm_watchdog()
         except MicrophoneError as e:
             self._log(f"Microphone error: {e}")
             if self.config.sound_effects:
@@ -105,6 +142,7 @@ class VoiceDaemon:
             return
 
         self.is_recording = False
+        self._cancel_watchdog()
         self._log("Recording stopped, processing...")
 
         if self.config.sound_effects:
@@ -192,7 +230,7 @@ class VoiceDaemon:
             print(f"Model: {self.config.model}")
             print(f"Output: {self.config.output_mode}")
             print("=" * 50)
-            print("\nReady! Hold hotkey and speak.\n")
+            print("\nReady! Press hotkey once to start, press again to stop.\n")
 
         # Keep running
         try:
@@ -206,6 +244,7 @@ class VoiceDaemon:
     def stop(self) -> None:
         """Stop the daemon."""
         self.running = False
+        self._cancel_watchdog()
 
         if self.keyboard_listener:
             self.keyboard_listener.stop()

@@ -36,6 +36,16 @@ WHISPER_MODELS = {
         "size": "~3GB",
         "speed": "Slow (~3s)",
         "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin"
+    },
+    # Registrado 11-ago-2026: config.json de Nelson apuntaba a este modelo desde
+    # el 2-jun pero no estaba en la tabla -> get_model_path() devolvía None y el
+    # fallback de whisper.cpp moría con "Model not found". El .bin ya está
+    # descargado en ~/.local/share/voice-to-claude/whisper.cpp/models/.
+    "large-v3-turbo-q5_0": {
+        "file": "ggml-large-v3-turbo-q5_0.bin",
+        "size": "~574MB",
+        "speed": "Fast (~1s)",
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin"
     }
 }
 
