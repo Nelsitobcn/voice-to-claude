@@ -35,13 +35,15 @@ class AudioRecorder:
         self.audio_data = []
 
         try:
-            self.stream = sd.InputStream(
-                samplerate=self.sample_rate,
-                channels=1,
-                dtype=np.float32,
-                callback=self._audio_callback
-            )
-            self.stream.start()
+            try:
+                self._open_stream()
+            except sd.PortAudioError:
+                # PortAudio fija la lista de micros al arrancar. Si el daemon arrancó
+                # antes que el micro USB (tras reiniciar el Mac), falla con -9986 para
+                # siempre. Reiniciar PortAudio refresca la lista (fallo 27/28-sep-2026).
+                sd._terminate()
+                sd._initialize()
+                self._open_stream()
             return True
         except sd.PortAudioError as e:
             self.is_recording = False
@@ -55,6 +57,15 @@ class AudioRecorder:
         except Exception as e:
             self.is_recording = False
             raise RecordingError(f"Error starting recording: {e}")
+
+    def _open_stream(self) -> None:
+        self.stream = sd.InputStream(
+            samplerate=self.sample_rate,
+            channels=1,
+            dtype=np.float32,
+            callback=self._audio_callback
+        )
+        self.stream.start()
 
     def stop(self) -> Optional[np.ndarray]:
         """Stop recording and return audio data. Returns None if no audio."""
