@@ -18,10 +18,22 @@ from .transcriber import Transcriber
 from .keyboard import TextInjector
 from . import sounds
 
-# Set up logging
+# Set up logging.
+# Se escribe SIEMPRE a fichero además de a stderr: cuando el daemon corre bajo
+# launchd lo lanza una .app AppleScript, y `do shell script` se traga la salida
+# hasta que el proceso termina => sin esto no hay forma de saber si el atajo
+# llegó, qué se transcribió, ni si se escribió el texto (11-ago-2026).
+_LOG_TO_FILE = Path.home() / "Library" / "Logs" / "voice-to-claude.daemon.log"
+try:
+    _LOG_TO_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _handlers = [logging.StreamHandler(), logging.FileHandler(_LOG_TO_FILE)]
+except OSError:
+    _handlers = [logging.StreamHandler()]
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=_handlers,
 )
 logger = logging.getLogger(__name__)
 
@@ -40,10 +52,11 @@ class VoiceDaemon:
 
         # State
         self.is_recording = False
-        self.pressed_keys: Set[keyboard.Key] = set()
+        self.pressed_keys: Set[str] = set()
+        self.hotkey_latched = False
         self.keyboard_listener: Optional[keyboard.Listener] = None
         self.running = False
-        # Watchdog: en modo toggle, si la segunda pulsación se pierde la
+        # Watchdog: si se pierde la suelta de teclas (o la 2ª pulsación del antiguo toggle) la
         # grabación seguiría abierta indefinidamente (4-jun-2026: daemon.log
         # registró audios de 415s y 1343s). Corta sola a max_recording_seconds.
         self._watchdog: Optional[threading.Timer] = None
@@ -51,18 +64,36 @@ class VoiceDaemon:
         # Build required keys set based on config
         self.required_keys = self._build_required_keys()
 
-    def _build_required_keys(self) -> Set[keyboard.Key]:
+    def _build_required_keys(self) -> Set[str]:
         """Build set of required modifier keys from config."""
         keys = set()
         if self.config.hotkey_ctrl:
-            keys.add(keyboard.Key.ctrl_l)
+            keys.add("ctrl")
         if self.config.hotkey_alt:
-            keys.add(keyboard.Key.alt_l)
+            keys.add("alt")
         if self.config.hotkey_shift:
-            keys.add(keyboard.Key.shift_l)
+            keys.add("shift")
         if self.config.hotkey_cmd:
-            keys.add(keyboard.Key.cmd_l)
+            keys.add("cmd")
         return keys
+
+    def _modifier_name(self, key: keyboard.Key) -> Optional[str]:
+        """Normalize left/right modifier variants from different keyboards."""
+        modifier_map = {
+            keyboard.Key.ctrl: "ctrl",
+            keyboard.Key.ctrl_l: "ctrl",
+            keyboard.Key.ctrl_r: "ctrl",
+            keyboard.Key.alt: "alt",
+            keyboard.Key.alt_l: "alt",
+            keyboard.Key.alt_r: "alt",
+            keyboard.Key.shift: "shift",
+            keyboard.Key.shift_l: "shift",
+            keyboard.Key.shift_r: "shift",
+            keyboard.Key.cmd: "cmd",
+            keyboard.Key.cmd_l: "cmd",
+            keyboard.Key.cmd_r: "cmd",
+        }
+        return modifier_map.get(key)
 
     def _log(self, message: str) -> None:
         """Log message unless in quiet mode."""
@@ -70,28 +101,31 @@ class VoiceDaemon:
             logger.info(message)
 
     def _on_press(self, key: keyboard.Key) -> None:
-        """Handle key press (TOGGLE mode: press once to start, press again to stop)."""
-        if key in self.required_keys:
-            self.pressed_keys.add(key)
+        """Handle key press (push-to-talk: hold hotkey to record)."""
+        modifier = self._modifier_name(key)
+        if modifier in self.required_keys:
+            self.pressed_keys.add(modifier)
 
-            # Toggle when the full hotkey combo is held down.
-            if self.pressed_keys == self.required_keys:
-                if not self.is_recording:
-                    self._start_recording()
-                else:
-                    self._stop_recording()
-                # Require a fresh full combo before toggling again, so holding
-                # the keys does not retrigger and a new press is needed.
-                self.pressed_keys.clear()
+            if (
+                self.required_keys.issubset(self.pressed_keys)
+                and not self.hotkey_latched
+                and not self.is_recording
+            ):
+                self.hotkey_latched = True
+                self._start_recording()
 
     def _on_release(self, key: keyboard.Key) -> None:
         """Handle key release.
 
-        Toggle mode: release does NOT stop recording (that is what the second
-        press is for). We only keep the pressed-keys set tidy.
+        Push-to-talk mode: releasing any part of the hotkey stops recording.
         """
-        if key in self.required_keys:
-            self.pressed_keys.discard(key)
+        modifier = self._modifier_name(key)
+        if modifier in self.required_keys:
+            self.pressed_keys.discard(modifier)
+            if self.hotkey_latched and self.is_recording:
+                self._stop_recording()
+            if not self.required_keys.issubset(self.pressed_keys):
+                self.hotkey_latched = False
 
     def _arm_watchdog(self) -> None:
         """Programa el corte automático de la grabación."""
@@ -117,6 +151,7 @@ class VoiceDaemon:
         )
         # pressed_keys puede haber quedado sucio si se perdió la 2ª pulsación.
         self.pressed_keys.clear()
+        self.hotkey_latched = False
         self._stop_recording()
 
     def _start_recording(self) -> None:
@@ -230,7 +265,7 @@ class VoiceDaemon:
             print(f"Model: {self.config.model}")
             print(f"Output: {self.config.output_mode}")
             print("=" * 50)
-            print("\nReady! Press hotkey once to start, press again to stop.\n")
+            print("\nReady! Hold the hotkey to talk, release to stop.\n")
 
         # Keep running
         try:
