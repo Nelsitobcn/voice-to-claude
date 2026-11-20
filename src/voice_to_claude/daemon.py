@@ -211,6 +211,23 @@ class VoiceDaemon:
             wav_path = self.recorder.save_to_wav(audio)
             self._log(f"Saved to: {wav_path}")
 
+            # Diagnóstico 20-nov: nivel de la grabación y copia de las 10 últimas
+            try:
+                import numpy as _np, shutil as _sh, time as _t
+                _a = _np.asarray(audio, dtype=_np.float64)
+                _rms = float(_np.sqrt(_np.mean(_a ** 2))) if _a.size else 0.0
+                _pk = float(_np.max(_np.abs(_a))) if _a.size else 0.0
+                _db = (20 * _np.log10(_rms) if _rms > 0 else -120.0)
+                _dbp = (20 * _np.log10(_pk) if _pk > 0 else -120.0)
+                self._log(f"Nivel grabacion: medio {_db:.1f} dBFS, pico {_dbp:.1f} dBFS")
+                _d = Path.home() / "Library/Logs/voice-to-claude-ultimas"
+                _d.mkdir(parents=True, exist_ok=True)
+                _sh.copy(wav_path, _d / f"{_t.strftime('%Y%m%d-%H%M%S')}.wav")
+                for _f in sorted(_d.glob("*.wav"))[:-10]:
+                    _f.unlink(missing_ok=True)
+            except Exception as _e:
+                self._log(f"Diagnostico nivel fallo: {_e}")
+
             # Transcribe
             result = self.transcriber.transcribe(wav_path)
 
