@@ -219,6 +219,14 @@ class VoiceDaemon:
 
             if result.success:
                 self._log(f"Transcribed ({result.duration_seconds:.1f}s): {result.text[:50]}...")
+                from .alucinaciones import limpiar
+                limpio = limpiar(result.text)
+                if limpio != result.text:
+                    self._log(f"Frase fantasma quitada: {result.text[:60]!r} -> {limpio[:60]!r}")
+                    result.text = limpio
+                if not result.text.strip():
+                    self._log("Solo era una frase fantasma de Whisper: no se escribe nada")
+                    return
 
                 # Inject text
                 if self.injector.inject(result.text):
